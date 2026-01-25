@@ -1,0 +1,59 @@
+# Example Docker Compose configuration for traefik-sync
+# 
+# This service syncs ACME certificates from a master Traefik instance
+# to failover instances for High Availability setup.
+#
+# Add this to your Traefik compose.yml on the FAILOVER host (e.g., helm)
+#
+# Prerequisites:
+# - SSH key access from failover to master host
+# - Master hostname resolvable (use FQDN)
+# - Docker socket access on failover host
+
+services:
+  traefik-sync:
+    image: ghcr.io/freender/traefik-sync:main
+    container_name: traefik-sync
+    restart: always
+    mem_limit: 128m
+    environment:
+      # Master Traefik hostname (use FQDN)
+      REMOTE_HOST: tower.freender.internal
+      
+      # Master Traefik configuration directory
+      REMOTE_PATH: /mnt/cache/appdata/traefik
+      
+      # Local mount point (maps to your traefik config dir)
+      LOCAL_PATH: /data
+      
+      # How often to check for changes (seconds)
+      SYNC_INTERVAL: 60
+      
+      # Name of your Traefik container to restart
+      CONTAINER_NAME: traefik2
+      
+      # Delay before restarting Traefik (seconds)
+      RESTART_DELAY: 5
+      
+      # File ownership - must match your Traefik container user
+      # Use: docker exec <traefik-container> id
+      FILE_OWNER: 1000
+      FILE_GROUP: 1000
+    
+    volumes:
+      # SSH keys for authentication (read-only)
+      - /home/freender/.ssh:/root/.ssh:ro
+      
+      # Your Traefik configuration directory
+      # This should match where acme.json and fileConfig.yml are stored
+      - /mnt/cache/appdata/traefik2:/data
+      
+      # Docker socket for restarting containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    
+    networks:
+      - net.internal
+
+networks:
+  net.internal:
+    external: true
