@@ -2,6 +2,7 @@
 set -e
 
 REMOTE_HOST="${REMOTE_HOST:-tower}"
+REMOTE_USER="${REMOTE_USER:-}"
 REMOTE_PATH="${REMOTE_PATH:-/mnt/cache/appdata/traefik}"
 LOCAL_PATH="${LOCAL_PATH:-/data}"
 SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
@@ -13,7 +14,13 @@ FILE_GROUP="${FILE_GROUP:-1000}"
 LAST_MOD=0
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Starting traefik-sync"
-echo "  Remote: ${REMOTE_HOST}:${REMOTE_PATH}"
+if [[ -n "$REMOTE_USER" ]]; then
+    REMOTE_SPEC="${REMOTE_USER}@${REMOTE_HOST}"
+else
+    REMOTE_SPEC="${REMOTE_HOST}"
+fi
+
+echo "  Remote: ${REMOTE_SPEC}:${REMOTE_PATH}"
 echo "  Local: ${LOCAL_PATH}"
 echo "  Interval: ${SYNC_INTERVAL}s"
 echo "  Container: ${CONTAINER_NAME}"
@@ -21,13 +28,13 @@ echo "  File ownership: ${FILE_OWNER}:${FILE_GROUP}"
 
 while true; do
     # Sync files from remote
-    if rsync -az --checksum -e "ssh -F /dev/null" "${REMOTE_HOST}:${REMOTE_PATH}/acme.json" "${LOCAL_PATH}/"; then
+    if rsync -az --checksum -e "ssh -F /dev/null" "${REMOTE_SPEC}:${REMOTE_PATH}/acme.json" "${LOCAL_PATH}/"; then
         chown "${FILE_OWNER}:${FILE_GROUP}" "${LOCAL_PATH}/acme.json" 2>/dev/null || true
     else
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Warning: rsync acme.json failed"
     fi
     
-    if rsync -az --checksum -e "ssh -F /dev/null" "${REMOTE_HOST}:${REMOTE_PATH}/fileConfig.yml" "${LOCAL_PATH}/"; then
+    if rsync -az --checksum -e "ssh -F /dev/null" "${REMOTE_SPEC}:${REMOTE_PATH}/fileConfig.yml" "${LOCAL_PATH}/"; then
         chown "${FILE_OWNER}:${FILE_GROUP}" "${LOCAL_PATH}/fileConfig.yml" 2>/dev/null || true
     else
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Warning: rsync fileConfig.yml failed"
