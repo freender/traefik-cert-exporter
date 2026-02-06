@@ -19,6 +19,9 @@ services:
     environment:
       # Master Traefik hostname (use FQDN)
       REMOTE_HOST: tower.freender.internal
+
+      # SSH user for the master host (optional)
+      REMOTE_USER: freender
       
       # Master Traefik configuration directory
       REMOTE_PATH: /mnt/cache/appdata/traefik

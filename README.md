@@ -35,6 +35,7 @@ services:
     mem_limit: 128m
     environment:
       REMOTE_HOST: master.example.com
+      REMOTE_USER: freender
       REMOTE_PATH: /path/to/master/traefik
       LOCAL_PATH: /data
       SYNC_INTERVAL: 60
@@ -57,6 +58,7 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REMOTE_HOST` | `tower` | Master Traefik hostname (use FQDN) |
+| `REMOTE_USER` | `` | SSH user for the master host (optional) |
 | `REMOTE_PATH` | `/mnt/cache/appdata/traefik` | Master Traefik config directory |
 | `LOCAL_PATH` | `/data` | Local mount point for Traefik config |
 | `SYNC_INTERVAL` | `60` | Sync interval in seconds |
@@ -99,7 +101,7 @@ docker logs -f traefik-sync
 Example output:
 ```
 [2026-01-25T18:10:22Z] Starting traefik-sync
-  Remote: master.example.com:/path/to/traefik
+  Remote: freender@master.example.com:/path/to/traefik
   Local: /data
   Interval: 60s
   Container: traefik
