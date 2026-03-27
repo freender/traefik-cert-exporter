@@ -1,30 +1,51 @@
 # traefik-sync
 
-Lightweight Docker container that syncs Traefik ACME certificates from a master instance to failover instances.
+Lightweight Docker image that syncs Traefik ACME certificates from a source instance to failover instances.
 
 ## Overview
 
-This container runs on failover Traefik instances and:
-1. Pulls `acme.json` and `fileConfig.yml` from the master instance via rsync over SSH
-2. Detects changes to `acme.json` using file modification timestamps
-3. Fixes file ownership to match Traefik container user
-4. Automatically restarts the Traefik container when certificates update
+The same image runs in two modes:
+
+1. `MODE=server` on the source host, serving `acme.json` and `fileConfig.yml`
+2. `MODE=client` on failover hosts, pulling those files on an interval
+3. Fixes file ownership to match the local Traefik container user
+4. Automatically restarts the local Traefik container when certificates update
 
 ## Features
 
-- **Rsync + stat**: Simple periodic sync with change detection
-- **SSH-based**: Secure file transfer using existing SSH keys
+- **Single image**: Same container image for source and failover roles
+- **HTTP mode**: Overlay-network sync without mounting SSH keys into containers
+- **SSH mode**: Existing rsync-over-SSH flow still supported for compatibility
 - **Automatic restart**: Triggers Traefik container restart on cert changes
 - **File ownership**: Ensures synced files match Traefik container user
 - **Configurable**: Environment variables for all settings
-- **Lightweight**: Alpine-based, ~45MB image
+- **Lightweight**: Alpine-based image with Bash, curl, Python, rsync, and docker-cli
 - **Multi-arch**: Supports linux/amd64 and linux/arm64
 
 ## Quick Start
 
-See [docker-compose.example.yml](docker-compose.example.yml) for a complete example configuration.
+See [docker-compose.example.yml](docker-compose.example.yml) for complete source + client examples.
 
-Add to your Traefik compose.yml on the **failover host**:
+Source host (`tower`) with overlay-only HTTP serving:
+
+```yaml
+services:
+  traefik-sync-source:
+    image: ghcr.io/freender/traefik-sync:main
+    container_name: traefik-sync-source
+    restart: always
+    environment:
+      MODE: server
+      SERVE_PATH: /source
+      LISTEN_PORT: 8080
+      API_TOKEN: change-me
+    volumes:
+      - /mnt/cache/appdata/traefik:/source:ro
+    networks:
+      - net.internal
+```
+
+Failover host (`helm` or `orbit`) pulling from the source service:
 
 ```yaml
 services:
@@ -32,23 +53,22 @@ services:
     image: ghcr.io/freender/traefik-sync:main
     container_name: traefik-sync
     restart: always
-    mem_limit: 128m
     environment:
-      REMOTE_HOST: master.example.com
-      REMOTE_USER: freender
-      REMOTE_PATH: /path/to/master/traefik
+      MODE: client
+      SYNC_PROTOCOL: http
+      SOURCE_URL: http://traefik-sync-source:8080
+      API_TOKEN: change-me
       LOCAL_PATH: /data
       SYNC_INTERVAL: 60
-      CONTAINER_NAME: traefik
+      CONTAINER_NAME: traefik2
       RESTART_DELAY: 5
       FILE_OWNER: 1000
       FILE_GROUP: 1000
     volumes:
-      - ~/.ssh:/root/.ssh:ro
       - /path/to/failover/traefik:/data
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - traefik_network
+      - net.internal
 ```
 
 ## Configuration
@@ -57,24 +77,35 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REMOTE_HOST` | `tower` | Master Traefik hostname (use FQDN) |
-| `REMOTE_USER` | `` | SSH user for the master host (optional) |
-| `REMOTE_PATH` | `/mnt/cache/appdata/traefik` | Master Traefik config directory |
-| `LOCAL_PATH` | `/data` | Local mount point for Traefik config |
-| `SYNC_INTERVAL` | `60` | Sync interval in seconds |
-| `CONTAINER_NAME` | `traefik2` | Name of Traefik container to restart |
-| `RESTART_DELAY` | `5` | Delay before restart in seconds |
+| `MODE` | `client` | `client` to sync files, `server` to serve them |
+| `SYNC_PROTOCOL` | `ssh` | Client protocol: `ssh` or `http` |
+| `SOURCE_URL` | `` | Base URL for HTTP mode, for example `http://traefik-sync-source:8080` |
+| `API_TOKEN` | `` | Optional bearer token for HTTP mode |
+| `REMOTE_HOST` | `tower` | Source hostname for SSH mode |
+| `REMOTE_USER` | `` | SSH user for SSH mode |
+| `REMOTE_PATH` | `/mnt/cache/appdata/traefik` | Source directory for SSH mode |
+| `SSH_COMMAND` | `ssh -F /dev/null` | SSH command passed to rsync in SSH mode |
+| `SERVE_PATH` | `/source` | Source directory served in server mode |
+| `LISTEN_HOST` | `0.0.0.0` | Bind host for server mode |
+| `LISTEN_PORT` | `8080` | Bind port for server mode |
+| `LOCAL_PATH` | `/data` | Client destination directory |
+| `SYNC_INTERVAL` | `60` | Client sync interval in seconds |
+| `CONTAINER_NAME` | `traefik2` | Client Traefik container to restart |
+| `RESTART_DELAY` | `5` | Delay before restarting Traefik |
 | `FILE_OWNER` | `1000` | UID for synced files |
 | `FILE_GROUP` | `1000` | GID for synced files |
 
 ## Requirements
 
-1. **SSH key access** from failover to master (passwordless authentication)
-2. **Master hostname** must be resolvable (use FQDN or add to /etc/hosts)
-3. **Docker socket access** for container restart capability
-4. **Correct FILE_OWNER/FILE_GROUP** - must match your Traefik container user
+1. **Shared network reachability** between source and failover containers
+2. **Docker socket access** on failover for container restart capability
+3. **Correct FILE_OWNER/FILE_GROUP** - must match your Traefik container user
+4. For HTTP mode, set the same `API_TOKEN` on source and clients
+
+For SSH mode, keep the existing SSH key access to the source host.
 
 Check Traefik container user:
+
 ```bash
 docker exec <traefik-container> id
 ```
@@ -82,37 +113,53 @@ docker exec <traefik-container> id
 ## Architecture
 
 ```
-MASTER (generates certs)              FAILOVER (syncs certs)
-/path/to/traefik/                     /path/to/traefik/
-├── acme.json      ◄─── rsync (60s) ─── traefik-sync container
-├── fileConfig.yml ◄─── SSH pull   ───   └─ Restarts Traefik on change
-└── traefik.yml                      ├── acme.json (synced)
-                                     ├── fileConfig.yml (synced)
-                                     └── traefik.yml
+SOURCE HOST (tower)                      FAILOVER HOST (helm/orbit)
+/path/to/traefik/                        /path/to/traefik/
+├── acme.json      ◄─── HTTP pull ─────── traefik-sync (MODE=client)
+├── fileConfig.yml ◄─── overlay net ───   └─ Restarts Traefik on change
+└── traefik-sync-source                  ├── acme.json (synced)
+    (MODE=server)                        ├── fileConfig.yml (synced)
+                                         └── traefik.yml
 ```
 
 ## Logs
 
 Monitor sync activity:
+
 ```bash
 docker logs -f traefik-sync
+docker logs -f traefik-sync-source
 ```
 
-Example output:
-```
-[2026-01-25T18:10:22Z] Starting traefik-sync
-  Remote: freender@master.example.com:/path/to/traefik
-  Local: /data
-  Interval: 60s
-  Container: traefik
-  File ownership: 1000:1000
-[2026-01-25T18:11:26Z] acme.json changed (was: 1769363615, now: 1769364076), restarting traefik in 5s
-[2026-01-25T18:11:31Z] Container traefik restarted successfully
+Example client output:
+
+```text
+[2026-03-26T22:10:22Z] Starting traefik-sync
+[2026-03-26T22:10:22Z] Source URL: http://traefik-sync-source:8080
+[2026-03-26T22:10:22Z] Local: /data
+[2026-03-26T22:10:22Z] Interval: 60s
+[2026-03-26T22:10:22Z] Container: traefik2
+[2026-03-26T22:10:22Z] File ownership: 1000:1000
+[2026-03-26T22:11:26Z] Updated acme.json
+[2026-03-26T22:11:26Z] Updated fileConfig.yml
+[2026-03-26T22:11:26Z] acme.json changed, restarting traefik2 in 5s
+[2026-03-26T22:11:31Z] Container traefik2 restarted successfully
 ```
 
 ## Troubleshooting
 
-**SSH connection fails:**
+**HTTP mode fails:**
+
+```bash
+# Test source endpoint from client container
+docker exec traefik-sync curl -H "Authorization: Bearer <token>" http://traefik-sync-source:8080/healthz
+
+# Test file access
+docker exec traefik-sync curl -I -H "Authorization: Bearer <token>" http://traefik-sync-source:8080/acme.json
+```
+
+**SSH mode fails:**
+
 ```bash
 # Test SSH from container
 docker exec traefik-sync ssh <master-host> "echo test"
@@ -122,6 +169,7 @@ docker exec traefik-sync ls -la /root/.ssh/
 ```
 
 **File ownership incorrect:**
+
 ```bash
 # Check current ownership
 ls -la /path/to/traefik/acme.json
@@ -133,6 +181,7 @@ docker exec <traefik-container> id
 ```
 
 **Container not restarting Traefik:**
+
 ```bash
 # Check Docker socket access
 docker exec traefik-sync docker ps
@@ -144,6 +193,7 @@ docker ps | grep traefik
 ## Development
 
 Build locally:
+
 ```bash
 docker build -t traefik-sync .
 ```

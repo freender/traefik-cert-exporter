@@ -1,57 +1,149 @@
 #!/bin/bash
 set -e
 
+MODE="${MODE:-client}"
+SYNC_PROTOCOL="${SYNC_PROTOCOL:-ssh}"
 REMOTE_HOST="${REMOTE_HOST:-tower}"
 REMOTE_USER="${REMOTE_USER:-}"
 REMOTE_PATH="${REMOTE_PATH:-/mnt/cache/appdata/traefik}"
+SOURCE_URL="${SOURCE_URL:-}"
 LOCAL_PATH="${LOCAL_PATH:-/data}"
 SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 CONTAINER_NAME="${CONTAINER_NAME:-traefik2}"
 RESTART_DELAY="${RESTART_DELAY:-5}"
 FILE_OWNER="${FILE_OWNER:-1000}"
 FILE_GROUP="${FILE_GROUP:-1000}"
+API_TOKEN="${API_TOKEN:-${HTTP_AUTH_TOKEN:-}}"
+SSH_COMMAND="${SSH_COMMAND:-ssh -F /dev/null}"
 
-LAST_MOD=0
+log() {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+}
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Starting traefik-sync"
-if [[ -n "$REMOTE_USER" ]]; then
-    REMOTE_SPEC="${REMOTE_USER}@${REMOTE_HOST}"
-else
-    REMOTE_SPEC="${REMOTE_HOST}"
+fetch_http_file() {
+    local file_name="$1"
+    local tmp_file="$2"
+    local url="${SOURCE_URL%/}/${file_name}"
+    local -a curl_args=(--fail --silent --show-error --location --connect-timeout 5 --output "$tmp_file")
+
+    if [[ -n "$API_TOKEN" ]]; then
+        curl_args=(-H "Authorization: Bearer ${API_TOKEN}" "${curl_args[@]}")
+    fi
+
+    curl "${curl_args[@]}" "$url"
+}
+
+fetch_ssh_file() {
+    local file_name="$1"
+    local tmp_file="$2"
+    local remote_spec
+
+    if [[ -n "$REMOTE_USER" ]]; then
+        remote_spec="${REMOTE_USER}@${REMOTE_HOST}"
+    else
+        remote_spec="${REMOTE_HOST}"
+    fi
+
+    rsync -az --checksum -e "$SSH_COMMAND" "${remote_spec}:${REMOTE_PATH}/${file_name}" "$tmp_file"
+}
+
+fetch_file() {
+    local file_name="$1"
+    local tmp_file="$2"
+
+    case "$SYNC_PROTOCOL" in
+        ssh)
+            fetch_ssh_file "$file_name" "$tmp_file"
+            ;;
+        http)
+            fetch_http_file "$file_name" "$tmp_file"
+            ;;
+        *)
+            echo "Unsupported SYNC_PROTOCOL: $SYNC_PROTOCOL" >&2
+            return 1
+            ;;
+    esac
+}
+
+apply_file() {
+    local file_name="$1"
+    local tmp_file="$2"
+    local target_file="${LOCAL_PATH}/${file_name}"
+
+    if [[ -f "$target_file" ]] && cmp -s "$tmp_file" "$target_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    mv "$tmp_file" "$target_file"
+    chown "${FILE_OWNER}:${FILE_GROUP}" "$target_file" 2>/dev/null || true
+    log "Updated ${file_name}"
+    return 0
+}
+
+restart_target() {
+    log "acme.json changed, restarting ${CONTAINER_NAME} in ${RESTART_DELAY}s"
+    sleep "$RESTART_DELAY"
+    if docker restart "$CONTAINER_NAME"; then
+        log "Container ${CONTAINER_NAME} restarted successfully"
+    else
+        log "ERROR: Failed to restart ${CONTAINER_NAME}"
+    fi
+}
+
+if [[ "$MODE" != "client" ]]; then
+    echo "sync.sh only supports MODE=client" >&2
+    exit 1
 fi
 
-echo "  Remote: ${REMOTE_SPEC}:${REMOTE_PATH}"
-echo "  Local: ${LOCAL_PATH}"
-echo "  Interval: ${SYNC_INTERVAL}s"
-echo "  Container: ${CONTAINER_NAME}"
-echo "  File ownership: ${FILE_OWNER}:${FILE_GROUP}"
+if [[ "$SYNC_PROTOCOL" == "http" ]] && [[ -z "$SOURCE_URL" ]]; then
+    echo "SOURCE_URL is required when SYNC_PROTOCOL=http" >&2
+    exit 1
+fi
+
+mkdir -p "$LOCAL_PATH"
+
+log "Starting traefik-sync"
+case "$SYNC_PROTOCOL" in
+    ssh)
+        if [[ -n "$REMOTE_USER" ]]; then
+            log "Remote: ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}"
+        else
+            log "Remote: ${REMOTE_HOST}:${REMOTE_PATH}"
+        fi
+        ;;
+    http)
+        log "Source URL: ${SOURCE_URL%/}"
+        ;;
+esac
+log "Local: ${LOCAL_PATH}"
+log "Interval: ${SYNC_INTERVAL}s"
+log "Container: ${CONTAINER_NAME}"
+log "File ownership: ${FILE_OWNER}:${FILE_GROUP}"
+
+initial_sync_done=false
 
 while true; do
-    # Sync files from remote
-    if rsync -az --checksum -e "ssh -F /dev/null" "${REMOTE_SPEC}:${REMOTE_PATH}/acme.json" "${LOCAL_PATH}/"; then
-        chown "${FILE_OWNER}:${FILE_GROUP}" "${LOCAL_PATH}/acme.json" 2>/dev/null || true
-    else
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Warning: rsync acme.json failed"
-    fi
-    
-    if rsync -az --checksum -e "ssh -F /dev/null" "${REMOTE_SPEC}:${REMOTE_PATH}/fileConfig.yml" "${LOCAL_PATH}/"; then
-        chown "${FILE_OWNER}:${FILE_GROUP}" "${LOCAL_PATH}/fileConfig.yml" 2>/dev/null || true
-    else
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Warning: rsync fileConfig.yml failed"
-    fi
+    acme_changed=false
 
-    # Check if acme.json changed
-    CURRENT_MOD=$(stat -c %Y "${LOCAL_PATH}/acme.json" 2>/dev/null || echo 0)
-    if [[ "$CURRENT_MOD" != "$LAST_MOD" && "$LAST_MOD" != "0" ]]; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] acme.json changed (was: $LAST_MOD, now: $CURRENT_MOD), restarting ${CONTAINER_NAME} in ${RESTART_DELAY}s"
-        sleep "$RESTART_DELAY"
-        if docker restart "$CONTAINER_NAME"; then
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Container ${CONTAINER_NAME} restarted successfully"
+    for file_name in acme.json fileConfig.yml; do
+        tmp_file=$(mktemp)
+        if fetch_file "$file_name" "$tmp_file"; then
+            if apply_file "$file_name" "$tmp_file"; then
+                if [[ "$file_name" == "acme.json" ]]; then
+                    acme_changed=true
+                fi
+            fi
         else
-            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: Failed to restart ${CONTAINER_NAME}"
+            rm -f "$tmp_file"
+            log "Warning: failed to sync ${file_name}"
         fi
-    fi
-    LAST_MOD="$CURRENT_MOD"
+    done
 
+    if [[ "$acme_changed" == "true" && "$initial_sync_done" == "true" ]]; then
+        restart_target
+    fi
+
+    initial_sync_done=true
     sleep "$SYNC_INTERVAL"
 done
