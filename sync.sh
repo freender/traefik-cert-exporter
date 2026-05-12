@@ -20,6 +20,28 @@ log() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
 }
 
+running=true
+
+handle_shutdown() {
+    running=false
+    log "Shutdown requested"
+}
+
+sleep_interruptible() {
+    local delay="$1"
+    local sleep_pid
+
+    sleep "$delay" &
+    sleep_pid="$!"
+    wait "$sleep_pid" || true
+    if [[ "$running" != "true" ]]; then
+        kill "$sleep_pid" 2>/dev/null || true
+        wait "$sleep_pid" 2>/dev/null || true
+    fi
+}
+
+trap handle_shutdown TERM INT
+
 fetch_http_file() {
     local file_name="$1"
     local tmp_file="$2"
@@ -83,7 +105,8 @@ apply_file() {
 
 restart_target() {
     log "acme.json changed, restarting ${CONTAINER_NAME} in ${RESTART_DELAY}s"
-    sleep "$RESTART_DELAY"
+    sleep_interruptible "$RESTART_DELAY"
+    [[ "$running" == "true" ]] || return 0
     if docker restart "$CONTAINER_NAME"; then
         log "Container ${CONTAINER_NAME} restarted successfully"
     else
@@ -123,7 +146,7 @@ log "File ownership: ${FILE_OWNER}:${FILE_GROUP}"
 
 initial_sync_done=false
 
-while true; do
+while [[ "$running" == "true" ]]; do
     acme_changed=false
 
     for file_name in acme.json fileConfig.yml; do
@@ -145,5 +168,7 @@ while true; do
     fi
 
     initial_sync_done=true
-    sleep "$SYNC_INTERVAL"
+    sleep_interruptible "$SYNC_INTERVAL"
 done
+
+log "Stopped traefik-sync"
