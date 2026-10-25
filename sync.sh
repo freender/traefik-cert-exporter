@@ -97,8 +97,8 @@ apply_file() {
         return 1
     fi
 
-    mv "$tmp_file" "$target_file"
-    chown "${FILE_OWNER}:${FILE_GROUP}" "$target_file" 2>/dev/null || true
+    chown "${FILE_OWNER}:${FILE_GROUP}" "$tmp_file" 2>/dev/null || true
+    mv -f "$tmp_file" "$target_file"
     log "Updated ${file_name}"
     return 0
 }
@@ -150,7 +150,11 @@ while [[ "$running" == "true" ]]; do
     acme_changed=false
 
     for file_name in acme.json fileConfig.yml; do
-        tmp_file=$(mktemp)
+        # Same directory as the target, so apply_file's mv is an atomic rename. A temp
+        # file under /tmp crosses filesystems: mv then unlinks the target before copying,
+        # and Traefik's file watcher sees fileConfig.yml missing and drops every @file
+        # middleware until the next event.
+        tmp_file=$(mktemp "${LOCAL_PATH}/.${file_name}.XXXXXX")
         if fetch_file "$file_name" "$tmp_file"; then
             if apply_file "$file_name" "$tmp_file"; then
                 if [[ "$file_name" == "acme.json" ]]; then
