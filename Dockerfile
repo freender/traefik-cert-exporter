@@ -1,20 +1,12 @@
 FROM alpine:latest
 
-RUN apk add --no-cache \
-    bash \
-    curl \
-    openssh-client \
-    python3 \
-    rsync \
-    docker-cli
+RUN apk add --no-cache python3 py3-redis
 
-COPY entrypoint.sh /entrypoint.sh
-COPY healthcheck.sh /healthcheck.sh
-COPY server.py /server.py
-COPY sync.sh /sync.sh
-RUN chmod +x /entrypoint.sh /healthcheck.sh /sync.sh
+COPY exporter.py /exporter.py
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD /healthcheck.sh
+USER 1000:1000
 
-CMD ["/entrypoint.sh"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python3 -c "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/exporter.ok') > 60)"
+
+CMD ["python3", "-u", "/exporter.py"]

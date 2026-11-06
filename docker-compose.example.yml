@@ -1,72 +1,14 @@
-# Example Docker Compose configuration for traefik-sync.
-#
-# Same image, two modes:
-# - tower: MODE=server serves acme.json and fileConfig.yml on the overlay network
-# - helm/orbit: MODE=client pulls those files and restarts local Traefik on change
-
 services:
-  traefik-sync-source:
-    image: ghcr.io/freender/traefik-sync:main
-    container_name: traefik-sync-source
+  traefik-cert-exporter:
+    image: ghcr.io/freender/traefik-cert-exporter:main
+    container_name: traefik-cert-exporter
+    init: true
     restart: always
-    mem_limit: 64m
+    user: 1000:1000
     environment:
-      MODE: server
-      SERVE_PATH: /source
-      LISTEN_PORT: 8080
-
-      # Set this to a long random value on all nodes
-      API_TOKEN: change-me
-
+      DOMAIN: example.net
+      REDIS_SENTINEL_ADDRS: sentinel-a:26379,sentinel-b:26379,sentinel-c:26379
+      REDIS_SENTINEL_MASTER: traefik
+      REDIS_PASS: ${REDIS_PASS}
     volumes:
-      - /mnt/cache/appdata/traefik:/source:ro
-
-    networks:
-      - net.internal
-
-  traefik-sync:
-    image: ghcr.io/freender/traefik-sync:main
-    container_name: traefik-sync
-    restart: always
-    mem_limit: 128m
-    environment:
-      MODE: client
-      SYNC_PROTOCOL: http
-
-      # Overlay service name for tower source container
-      SOURCE_URL: http://traefik-sync-source:8080
-
-      # Must match the source container token
-      API_TOKEN: change-me
-
-      # Local mount point (maps to your traefik config dir)
-      LOCAL_PATH: /data
-
-      # How often to check for changes (seconds)
-      SYNC_INTERVAL: 60
-
-      # Name of your Traefik container to restart
-      CONTAINER_NAME: traefik2
-
-      # Delay before restarting Traefik (seconds)
-      RESTART_DELAY: 5
-
-      # File ownership - must match your Traefik container user
-      # Use: docker exec <traefik-container> id
-      FILE_OWNER: 1000
-      FILE_GROUP: 1000
-
-    volumes:
-      # Your Traefik configuration directory
-      # This should match where acme.json and fileConfig.yml are stored
-      - /mnt/cache/appdata/traefik2:/data
-
-      # Docker socket for restarting containers
-      - /var/run/docker.sock:/var/run/docker.sock
-
-    networks:
-      - net.internal
-
-networks:
-  net.internal:
-    external: true
+      - ./acme.json:/acme/acme.json:ro
